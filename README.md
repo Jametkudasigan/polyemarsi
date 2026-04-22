@@ -28,5 +28,5 @@ nano .env
 
 run bot
 ```
-python -m src.bot
+python src/bot.py
 ```
