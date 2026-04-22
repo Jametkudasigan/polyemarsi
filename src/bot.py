@@ -6,77 +6,218 @@ Flow:
 2. ENTRY: Place FOK market order on Polymarket (Up/Down token)
 3. MONITORING: Wait for market resolution
 4. REDEEM: Auto cash out winning positions -> back to SCANNING
-
-Dashboard always shows:
-- USDC balance (funder address)
-- Signal from Binance/Yahoo
-- Current BTC 5m market being scanned
 """
 import os
 import sys
 import time
-import json
 import logging
-import math
-from datetime import datetime
 from typing import Optional
+from datetime import datetime
 
-from colorama import init, Fore, Style
+# ------------------------------------------------------------------
+# Rich UI Imports
+# ------------------------------------------------------------------
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.layout import Layout
+    from rich.text import Text
+    from rich import box
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+    print("[ERROR] rich not installed. Run: pip install rich")
+    sys.exit(1)
 
-from src.config import load_config, BotConfig
-from src.signals import SignalEngine, SignalResult
-from src.polymarket import PolymarketTrader, MarketInfo
+console = Console()
 
-init(autoreset=True)
+# ------------------------------------------------------------------
+# Polymarket / Config Imports
+# ------------------------------------------------------------------
+try:
+    from src.config import load_config, BotConfig
+    from src.signals import SignalEngine, SignalResult
+    from src.polymarket import PolymarketTrader, MarketInfo
+except ModuleNotFoundError:
+    # Fallback kalau di-run langsung dari src/
+    from config import load_config, BotConfig
+    from signals import SignalEngine, SignalResult
+    from polymarket import PolymarketTrader, MarketInfo
 
+# ------------------------------------------------------------------
+# Logging (minimal, karena Rich yang handle UI)
+# ------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-    datefmt="%H:%M:%S"
+    level=logging.WARNING,
+    format="%(message)s"
 )
 logger = logging.getLogger(__name__)
 
-def print_banner():
-    print(Fore.CYAN + """
-============================================================
-     POLYMARKET BTC 5-MINUTE TRADING BOT
-     Strategy: EMA50 + RSI Pullback + Momentum Confirmation
-============================================================
-""" + Style.RESET_ALL)
+# ==================================================================
+# UI HELPERS
+# ==================================================================
 
-def print_scan_dashboard(balance: float, signal: SignalResult, market: Optional[MarketInfo]):
-    """Print scanning mode dashboard."""
-    print("\n" + "-" * 60)
-    print(Fore.YELLOW + "MODE: SCANNING MARKET" + Style.RESET_ALL)
-    print("-" * 60)
-    print(f"Balance (Funder):     ${balance:.2f} USDC")
-    print(f"Signal Source:        {signal.analysis.split(' | ')[0] if signal else 'Loading...'}")
-    print(f"   Confidence:           {signal.confidence*100:.1f}%" if signal else "")
-    print(f"   RSI:                  {signal.rsi:.1f}" if signal else "")
-    print(f"   EMA Slope:            {signal.ema_slope:+.4f}%" if signal else "")
-    print(f"   Window Delta:         {signal.window_delta_pct:+.4f}%" if signal else "")
+def make_progress_bar(elapsed: int, total: int, width: int = 30) -> str:
+    """Buat progress bar countdown yang keren."""
+    filled = int(width * elapsed / total)
+    bar = "█" * filled + "░" * (width - filled)
+    pct = elapsed / total * 100
+    return f"[{bar}] {pct:.0f}%"
 
-    if market:
-        print(f"Market:               {market.slug}")
-        print(f"   Up Price:             {market.up_price:.4f}")
-        print(f"   Down Price:           {market.down_price:.4f}")
-        print(f"   Resolved:             {'YES' if market.resolved else 'NO'}")
+def make_countdown_bar(remaining: int, total: int = 300, width: int = 28) -> str:
+    """Progress bar untuk sisa waktu (dari penuh ke kosong)."""
+    elapsed = total - remaining
+    filled = int(width * elapsed / total)
+    bar = "█" * filled + "░" * (width - filled)
+    mins, secs = divmod(remaining, 60)
+    return f"[{bar}] {mins:02d}:{secs:02d}"
+
+def format_signal_emoji(direction: str, confidence: float) -> tuple:
+    """Return (status_emoji, status_text, color)."""
+    if direction == "UP" and confidence >= 0.6:
+        return "🟢", "BULLISH SIGNAL", "green"
+    elif direction == "DOWN" and confidence >= 0.6:
+        return "🔴", "BEARISH SIGNAL", "red"
+    elif direction in ("UP", "DOWN") and confidence < 0.6:
+        return "🟡", f"WEAK {direction}", "yellow"
     else:
-        print(f"Market:               Waiting for next 5m window...")
-    print("-" * 60)
+        return "⚪", "NO SIGNAL", "white"
 
-def print_position_dashboard(balance: float, market: MarketInfo, entry_side: str, entry_amount: float):
-    """Print position monitoring dashboard."""
-    print("\n" + "-" * 60)
-    print(Fore.GREEN + "MODE: MONITORING POSITION" + Style.RESET_ALL)
-    print("-" * 60)
-    print(f"Balance (Funder):     ${balance:.2f} USDC")
-    print(f"Market:               {market.slug}")
-    side_color = Fore.GREEN if entry_side == "UP" else Fore.RED
-    print(f"Entry Side:           {side_color}{entry_side}{Style.RESET_ALL}")
-    print(f"Entry Amount:         ${entry_amount:.2f} USDC")
-    print(f"Window Closes:        ~{300 - (int(time.time()) % 300)}s remaining")
-    print("-" * 60)
+# ==================================================================
+# DASHBOARD RENDERERS
+# ==================================================================
+
+def render_scan_dashboard(
+    balance: float,
+    signal: SignalResult,
+    market: Optional[MarketInfo],
+    next_epoch: int
+) -> Panel:
+    """Render dashboard mode SCANNING dengan Rich Panel + Table."""
+    
+    now = int(time.time())
+    seconds_to_next = max(0, next_epoch - now)
+    seconds_in_window = 300 - seconds_to_next
+    
+    # ── Signal styling ──
+    sig_emoji, sig_text, sig_color = format_signal_emoji(signal.direction, signal.confidence)
+    
+    # ── Build Table ──
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("key", style="bold cyan", width=18)
+    table.add_column("value", style="white")
+    
+    table.add_row("💰 Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
+    table.add_row("📡 Source", "Binance API (Yahoo Fallback)")
+    table.add_row("")
+    
+    # Signal section
+    table.add_row("📊 Direction", f"[{sig_color}]{signal.direction}[/{sig_color}]")
+    table.add_row("🎯 Confidence", f"{signal.confidence*100:.1f}%")
+    table.add_row("📈 RSI", f"{signal.rsi:.1f}")
+    table.add_row("📉 EMA Slope", f"{signal.ema_slope:+.4f}%")
+    table.add_row("📊 Window Δ", f"{signal.window_delta_pct:+.4f}%")
+    table.add_row("")
+    
+    # Market section
+    if market:
+        table.add_row("🎰 Market", f"[dim]{market.slug}[/dim]")
+        table.add_row("💵 UP Price", f"[green]{market.up_price:.4f}[/green]")
+        table.add_row("💵 DOWN Price", f"[red]{market.down_price:.4f}[/red]")
+        table.add_row("🔒 Resolved", "[bold red]YES[/bold red]" if market.resolved else "[bold green]NO[/bold green]")
+    else:
+        table.add_row("🎰 Market", "[dim]Waiting for next window...[/dim]")
+    
+    table.add_row("")
+    
+    # Countdown progress bar
+    countdown = make_countdown_bar(seconds_to_next, 300)
+    table.add_row("⏳ Next Window", f"[bold yellow]{countdown}[/bold yellow]")
+    
+    # ── Wrap in Panel ──
+    header = Text("🤖  POLYMARKET BTC 5M BOT  •  SCANNING MARKET", style="bold white on blue")
+    footer = Text(f"{sig_emoji}  {sig_text}  •  {datetime.now().strftime('%H:%M:%S')}", style=f"bold {sig_color}")
+    
+    content = Text.assemble(
+        header, "\n",
+        "─" * 62, "\n",
+        table, "\n",
+        "─" * 62, "\n",
+        footer
+    )
+    
+    return Panel(
+        content,
+        border_style="blue",
+        box=box.ROUNDED,
+        padding=(1, 2),
+        title="[bold blue]SCAN MODE[/bold blue]",
+        title_align="left"
+    )
+
+
+def render_monitor_dashboard(
+    balance: float,
+    market: MarketInfo,
+    entry_side: str,
+    entry_amount: float,
+    entry_price: float
+) -> Panel:
+    """Render dashboard mode MONITORING dengan Rich Panel + Table."""
+    
+    now = int(time.time())
+    entered_epoch = int(market.slug.split("-")[-1])
+    window_end = entered_epoch + 300
+    remaining = max(0, window_end - now)
+    elapsed = 300 - remaining
+    
+    side_color = "green" if entry_side == "UP" else "red"
+    side_emoji = "🟢" if entry_side == "UP" else "🔴"
+    
+    # ── Build Table ──
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("key", style="bold cyan", width=18)
+    table.add_column("value", style="white")
+    
+    table.add_row("💰 Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
+    table.add_row("🎰 Market", f"[dim]{market.slug}[/dim]")
+    table.add_row("")
+    table.add_row(f"{side_emoji} Entry Side", f"[bold {side_color}]{entry_side}[/{side_color}]")
+    table.add_row("💵 Entry Amount", f"[bold]${entry_amount:.2f}[/bold] USDC")
+    table.add_row("💵 Entry Price", f"{entry_price:.4f}")
+    table.add_row("")
+    
+    # Countdown progress bar (elapsed = filled)
+    progress = make_progress_bar(elapsed, 300)
+    mins, secs = divmod(remaining, 60)
+    table.add_row("⏳ Window Close", f"[bold yellow]{progress}[/bold yellow]  ({mins:02d}:{secs:02d})")
+    
+    # ── Wrap in Panel ──
+    header = Text("🤖  POLYMARKET BTC 5M BOT  •  MONITORING POSITION", style="bold white on green")
+    footer = Text(f"{side_emoji}  POSITION OPEN  •  Waiting resolution...  •  {datetime.now().strftime('%H:%M:%S')}", style="bold green")
+    
+    content = Text.assemble(
+        header, "\n",
+        "─" * 62, "\n",
+        table, "\n",
+        "─" * 62, "\n",
+        footer
+    )
+    
+    return Panel(
+        content,
+        border_style="green",
+        box=box.ROUNDED,
+        padding=(1, 2),
+        title="[bold green]MONITOR MODE[/bold green]",
+        title_align="left"
+    )
+
+
+# ==================================================================
+# BOT CLASS
+# ==================================================================
 
 class BTC5mBot:
     def __init__(self, config: BotConfig):
@@ -92,26 +233,21 @@ class BTC5mBot:
             relayer_api_key=config.relayer_api_key,
             relayer_api_key_address=config.relayer_api_key_address
         )
-
+        
         self.state = "SCANNING"
         self.current_market: Optional[MarketInfo] = None
         self.entry_side: Optional[str] = None
         self.entry_amount: float = 0.0
         self.entry_price: float = 0.0
-
+    
     def get_current_5m_epoch(self) -> int:
         now = int(time.time())
         return (now // 300) * 300
-
+    
     def get_next_5m_epoch(self) -> int:
         now = int(time.time())
         return ((now // 300) + 1) * 300
-
-    def seconds_to_next_window(self) -> int:
-        now = int(time.time())
-        next_window = self.get_next_5m_epoch()
-        return next_window - now
-
+    
     def scan(self) -> bool:
         """
         Scanning phase:
@@ -122,131 +258,137 @@ class BTC5mBot:
         5. If valid -> return True (ready to enter)
         """
         balance = self.trader.get_usdc_balance()
-
+        
         try:
             signal = self.signal_engine.analyze()
         except Exception as e:
-            logger.error("Signal analysis failed: %s", e)
-            signal = SignalResult("NEUTRAL", 0, 0, 50, 0, 0, 0, "Error")
-
+            signal = SignalResult("NEUTRAL", 0, 0, 50, 0, 0, 0, f"Error: {e}")
+        
         epoch = self.get_current_5m_epoch()
+        next_epoch = self.get_next_5m_epoch()
         market = self.trader.discover_btc_5m_market(epoch)
-
-        print_scan_dashboard(balance, signal, market)
-
+        
+        # Render dashboard
+        panel = render_scan_dashboard(balance, signal, market, next_epoch)
+        console.print(panel)
+        
+        # Validation
         if balance < self.config.min_entry_usdc:
-            logger.warning("Insufficient balance: $%.2f < $%.2f min", balance, self.config.min_entry_usdc)
+            console.print("[dim]Insufficient balance, waiting...[/dim]\n")
             return False
-
+        
         if not market or market.resolved:
-            logger.info("No active market for epoch %d", epoch)
+            console.print("[dim]No active market, waiting...[/dim]\n")
             return False
-
+        
         seconds_remaining = 300 - (int(time.time()) % 300)
         if seconds_remaining < 30:
-            logger.info("Too close to window close (%ds), waiting for next window", seconds_remaining)
+            console.print("[yellow]Too close to window close, waiting next...[/yellow]\n")
             return False
-
-        # Strategy Validation
+        
         if signal.direction not in ("UP", "DOWN"):
-            logger.info("Signal direction unclear: %s", signal.direction)
             return False
-
+        
         if signal.confidence < 0.6:
-            logger.info("Confidence too low: %.2f < 0.6", signal.confidence)
             return False
-
-        # Odds Filter
-        target_token = market.up_token_id if signal.direction == "UP" else market.down_token_id
-        current_price = market.up_price if signal.direction == "UP" else market.down_price
-
-        if not (self.config.odds_min <= current_price <= self.config.odds_max):
-            logger.info("Odds filter: price %.4f outside range [%.2f - %.2f]",
-                       current_price, self.config.odds_min, self.config.odds_max)
+        
+        target_price = market.up_price if signal.direction == "UP" else market.down_price
+        if not (self.config.odds_min <= target_price <= self.config.odds_max):
+            console.print(f"[yellow]Odds filter: {target_price:.4f} outside range[/yellow]\n")
             return False
-
-        logger.info("VALID SIGNAL | Direction: %s | Price: %.4f | Confidence: %.2f",
-                   signal.direction, current_price, signal.confidence)
-
+        
+        console.print(f"[bold green]✅ VALID SIGNAL | {signal.direction} @ {target_price:.4f} | Confidence: {signal.confidence:.0%}[/bold green]\n")
+        
         self.current_market = market
         self.entry_side = signal.direction
-        self.entry_price = current_price
+        self.entry_price = target_price
         return True
-
+    
     def enter_position(self) -> bool:
         if not self.current_market or not self.entry_side:
             return False
-
+        
         amount = min(self.config.max_entry_usdc, self.config.min_entry_usdc)
         amount = max(amount, 1.0)
-
+        
         token_id = (self.current_market.up_token_id if self.entry_side == "UP"
                    else self.current_market.down_token_id)
-
-        logger.info("ENTERING POSITION | Side: %s | Amount: $%.2f | Token: %s",
-                   self.entry_side, amount, token_id[:16])
-
+        
+        console.print(f"[bold cyan]🚀 ENTERING {self.entry_side} | ${amount:.2f} @ {self.entry_price:.4f}[/bold cyan]")
+        
         resp = self.trader.place_market_order(token_id, amount, "BUY")
-
+        
         if resp and resp.get("success"):
             self.entry_amount = amount
             self.state = "IN_POSITION"
-            logger.info("POSITION ENTERED")
+            console.print(f"[bold green]✅ POSITION ENTERED SUCCESSFULLY[/bold green]\n")
             return True
         else:
-            logger.error("Entry failed: %s", resp)
+            console.print(f"[bold red]❌ ENTRY FAILED: {resp}[/bold red]\n")
             self.state = "SCANNING"
             return False
-
+    
     def monitor_position(self) -> bool:
         if not self.current_market:
             return False
-
+        
         balance = self.trader.get_usdc_balance()
-        print_position_dashboard(balance, self.current_market, self.entry_side or "UNKNOWN", self.entry_amount)
-
+        
+        panel = render_monitor_dashboard(
+            balance, self.current_market,
+            self.entry_side or "UNKNOWN",
+            self.entry_amount,
+            self.entry_price
+        )
+        console.print(panel)
+        
         entered_epoch = int(self.current_market.slug.split("-")[-1])
-
+        
         refreshed = self.trader.discover_btc_5m_market(entered_epoch)
         if refreshed and refreshed.resolved:
             self.current_market = refreshed
-            logger.info("MARKET RESOLVED | Winner: %s", refreshed.outcome)
+            console.print(f"[bold green]🎉 MARKET RESOLVED | Winner: {refreshed.outcome}[/bold green]\n")
             return True
-
+        
         now = int(time.time())
         window_end = entered_epoch + 300
-        if now > window_end + 60:
-            if now > window_end + 300:
-                logger.info("Assuming resolution complete")
-                return True
-
+        if now > window_end + 300:
+            console.print("[yellow]Assuming resolution complete[/yellow]\n")
+            return True
+        
         return False
-
+    
     def redeem_and_reset(self):
-        logger.info("Redeeming positions...")
+        console.print("[bold cyan]💰 Redeeming positions...[/bold cyan]")
         redeemed = self.trader.redeem_all_positions()
-
+        
         if redeemed > 0:
             new_balance = self.trader.get_usdc_balance()
-            logger.info("New balance: $%.2f USDC", new_balance)
-
+            console.print(f"[bold green]💰 New Balance: ${new_balance:.2f} USDC[/bold green]")
+        
         self.state = "SCANNING"
         self.current_market = None
         self.entry_side = None
         self.entry_amount = 0.0
         self.entry_price = 0.0
-
-        logger.info("Reset to SCANNING mode")
-
+        
+        console.print("[bold blue]🔄 Back to SCANNING[/bold blue]\n")
+    
     def run(self):
-        print_banner()
-        logger.info("Bot starting... Proxy: %s", self.config.proxy_address[:20])
-
+        console.print(Panel(
+            "[bold white]POLYMARKET BTC 5-MINUTE TRADING BOT[/bold white]\n"
+            "[dim]Strategy: EMA50 + RSI Pullback + Momentum Confirmation[/dim]",
+            border_style="blue",
+            box=box.DOUBLE,
+            padding=(1, 4)
+        ))
+        console.print(f"[dim]Proxy: {self.config.proxy_address[:20]}...[/dim]\n")
+        
         while True:
             try:
                 if self.state == "SCANNING":
                     self.trader.redeem_all_positions()
-
+                    
                     valid = self.scan()
                     if valid:
                         success = self.enter_position()
@@ -254,29 +396,31 @@ class BTC5mBot:
                             time.sleep(self.config.scan_interval)
                     else:
                         time.sleep(self.config.scan_interval)
-
+                
                 elif self.state == "IN_POSITION":
                     resolved = self.monitor_position()
                     if resolved:
                         self.redeem_and_reset()
                     else:
                         time.sleep(self.config.position_check_interval)
-
+                
                 else:
                     self.state = "SCANNING"
                     time.sleep(5)
-
+                    
             except KeyboardInterrupt:
-                logger.info("Bot stopped by user")
+                console.print("\n[bold yellow]👋 Bot stopped by user[/bold yellow]")
                 break
             except Exception as e:
-                logger.error("Main loop error: %s", e)
+                console.print(f"[bold red]⚠️  Error: {e}[/bold red]")
                 time.sleep(10)
+
 
 def main():
     config = load_config()
     bot = BTC5mBot(config)
     bot.run()
+
 
 if __name__ == "__main__":
     main()
