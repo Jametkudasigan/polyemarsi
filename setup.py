@@ -17,6 +17,7 @@ setup(
         "eth-utils>=2.0.0",
         "python-dotenv>=1.0.0",
         "colorama>=0.4.6",
+        "rich>=13.0.0",
     ],
     dependency_links=[
         "git+https://github.com/Polymarket/py-builder-relayer-client.git",
