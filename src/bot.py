@@ -18,10 +18,9 @@ from datetime import datetime
 # Rich UI Imports
 # ------------------------------------------------------------------
 try:
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.panel import Panel
     from rich.table import Table
-    from rich.layout import Layout
     from rich.text import Text
     from rich import box
     RICH_AVAILABLE = True
@@ -40,41 +39,34 @@ try:
     from src.signals import SignalEngine, SignalResult
     from src.polymarket import PolymarketTrader, MarketInfo
 except ModuleNotFoundError:
-    # Fallback kalau di-run langsung dari src/
     from config import load_config, BotConfig
     from signals import SignalEngine, SignalResult
     from polymarket import PolymarketTrader, MarketInfo
 
 # ------------------------------------------------------------------
-# Logging (minimal, karena Rich yang handle UI)
+# Logging
 # ------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(message)s"
-)
+logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 # ==================================================================
 # UI HELPERS
 # ==================================================================
 
-def make_progress_bar(elapsed: int, total: int, width: int = 30) -> str:
-    """Buat progress bar countdown yang keren."""
-    filled = int(width * elapsed / total)
-    bar = "█" * filled + "░" * (width - filled)
-    pct = elapsed / total * 100
-    return f"[{bar}] {pct:.0f}%"
-
 def make_countdown_bar(remaining: int, total: int = 300, width: int = 28) -> str:
-    """Progress bar untuk sisa waktu (dari penuh ke kosong)."""
     elapsed = total - remaining
     filled = int(width * elapsed / total)
     bar = "█" * filled + "░" * (width - filled)
     mins, secs = divmod(remaining, 60)
     return f"[{bar}] {mins:02d}:{secs:02d}"
 
-def format_signal_emoji(direction: str, confidence: float) -> tuple:
-    """Return (status_emoji, status_text, color)."""
+def make_progress_bar(elapsed: int, total: int = 300, width: int = 28) -> str:
+    filled = int(width * elapsed / total)
+    bar = "█" * filled + "░" * (width - filled)
+    mins, secs = divmod(total - elapsed, 60)
+    return f"[{bar}] {mins:02d}:{secs:02d}"
+
+def format_signal_style(direction: str, confidence: float) -> tuple:
     if direction == "UP" and confidence >= 0.6:
         return "🟢", "BULLISH SIGNAL", "green"
     elif direction == "DOWN" and confidence >= 0.6:
@@ -94,16 +86,11 @@ def render_scan_dashboard(
     market: Optional[MarketInfo],
     next_epoch: int
 ) -> Panel:
-    """Render dashboard mode SCANNING dengan Rich Panel + Table."""
-    
     now = int(time.time())
     seconds_to_next = max(0, next_epoch - now)
-    seconds_in_window = 300 - seconds_to_next
     
-    # ── Signal styling ──
-    sig_emoji, sig_text, sig_color = format_signal_emoji(signal.direction, signal.confidence)
+    sig_emoji, sig_text, sig_color = format_signal_style(signal.direction, signal.confidence)
     
-    # ── Build Table ──
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("key", style="bold cyan", width=18)
     table.add_column("value", style="white")
@@ -111,8 +98,6 @@ def render_scan_dashboard(
     table.add_row("💰 Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
     table.add_row("📡 Source", "Binance API (Yahoo Fallback)")
     table.add_row("")
-    
-    # Signal section
     table.add_row("📊 Direction", f"[{sig_color}]{signal.direction}[/{sig_color}]")
     table.add_row("🎯 Confidence", f"{signal.confidence*100:.1f}%")
     table.add_row("📈 RSI", f"{signal.rsi:.1f}")
@@ -120,7 +105,6 @@ def render_scan_dashboard(
     table.add_row("📊 Window Δ", f"{signal.window_delta_pct:+.4f}%")
     table.add_row("")
     
-    # Market section
     if market:
         table.add_row("🎰 Market", f"[dim]{market.slug}[/dim]")
         table.add_row("💵 UP Price", f"[green]{market.up_price:.4f}[/green]")
@@ -130,22 +114,14 @@ def render_scan_dashboard(
         table.add_row("🎰 Market", "[dim]Waiting for next window...[/dim]")
     
     table.add_row("")
-    
-    # Countdown progress bar
     countdown = make_countdown_bar(seconds_to_next, 300)
     table.add_row("⏳ Next Window", f"[bold yellow]{countdown}[/bold yellow]")
     
-    # ── Wrap in Panel ──
     header = Text("🤖  POLYMARKET BTC 5M BOT  •  SCANNING MARKET", style="bold white on blue")
+    sep = Text("─" * 62, style="dim")
     footer = Text(f"{sig_emoji}  {sig_text}  •  {datetime.now().strftime('%H:%M:%S')}", style=f"bold {sig_color}")
     
-    content = Text.assemble(
-        header, "\n",
-        "─" * 62, "\n",
-        table, "\n",
-        "─" * 62, "\n",
-        footer
-    )
+    content = Group(header, sep, table, sep, footer)
     
     return Panel(
         content,
@@ -164,8 +140,6 @@ def render_monitor_dashboard(
     entry_amount: float,
     entry_price: float
 ) -> Panel:
-    """Render dashboard mode MONITORING dengan Rich Panel + Table."""
-    
     now = int(time.time())
     entered_epoch = int(market.slug.split("-")[-1])
     window_end = entered_epoch + 300
@@ -175,7 +149,6 @@ def render_monitor_dashboard(
     side_color = "green" if entry_side == "UP" else "red"
     side_emoji = "🟢" if entry_side == "UP" else "🔴"
     
-    # ── Build Table ──
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("key", style="bold cyan", width=18)
     table.add_column("value", style="white")
@@ -187,23 +160,15 @@ def render_monitor_dashboard(
     table.add_row("💵 Entry Amount", f"[bold]${entry_amount:.2f}[/bold] USDC")
     table.add_row("💵 Entry Price", f"{entry_price:.4f}")
     table.add_row("")
-    
-    # Countdown progress bar (elapsed = filled)
     progress = make_progress_bar(elapsed, 300)
     mins, secs = divmod(remaining, 60)
     table.add_row("⏳ Window Close", f"[bold yellow]{progress}[/bold yellow]  ({mins:02d}:{secs:02d})")
     
-    # ── Wrap in Panel ──
     header = Text("🤖  POLYMARKET BTC 5M BOT  •  MONITORING POSITION", style="bold white on green")
+    sep = Text("─" * 62, style="dim")
     footer = Text(f"{side_emoji}  POSITION OPEN  •  Waiting resolution...  •  {datetime.now().strftime('%H:%M:%S')}", style="bold green")
     
-    content = Text.assemble(
-        header, "\n",
-        "─" * 62, "\n",
-        table, "\n",
-        "─" * 62, "\n",
-        footer
-    )
+    content = Group(header, sep, table, sep, footer)
     
     return Panel(
         content,
@@ -249,14 +214,6 @@ class BTC5mBot:
         return ((now // 300) + 1) * 300
     
     def scan(self) -> bool:
-        """
-        Scanning phase:
-        1. Check balance
-        2. Fetch signal from Binance/Yahoo
-        3. Discover current BTC 5m market
-        4. Check odds filter (0.45 - 0.55)
-        5. If valid -> return True (ready to enter)
-        """
         balance = self.trader.get_usdc_balance()
         
         try:
@@ -268,11 +225,9 @@ class BTC5mBot:
         next_epoch = self.get_next_5m_epoch()
         market = self.trader.discover_btc_5m_market(epoch)
         
-        # Render dashboard
         panel = render_scan_dashboard(balance, signal, market, next_epoch)
         console.print(panel)
         
-        # Validation
         if balance < self.config.min_entry_usdc:
             console.print("[dim]Insufficient balance, waiting...[/dim]\n")
             return False
