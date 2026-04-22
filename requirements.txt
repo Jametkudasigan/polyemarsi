@@ -1,0 +1,19 @@
+# Polymarket SDKs
+py-clob-client>=0.34.0
+py-builder-relayer-client @ git+https://github.com/Polymarket/py-builder-relayer-client.git
+py-builder-signing-sdk @ git+https://github.com/Polymarket/py-builder-signing-sdk.git
+
+# Data & Analysis
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+yfinance>=0.2.28
+
+# Ethereum / Web3
+web3>=6.0.0
+eth-abi>=4.0.0
+eth-utils>=2.0.0
+
+# Utils
+python-dotenv>=1.0.0
+colorama>=0.4.6
