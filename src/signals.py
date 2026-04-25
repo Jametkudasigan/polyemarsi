@@ -1,9 +1,12 @@
 """
 Technical analysis engine for BTC 5m prediction.
 Uses Binance API as primary, Yahoo Finance as fallback.
+
+STRATEGY: EMA 9/21 Crossover + RSI 14 Bounce
+🟢 BUY: Price > EMA21, EMA9 > EMA21, RSI turun ke 35-40 lalu mantul naik
+🔴 SELL: Price < EMA21, EMA9 < EMA21, RSI naik ke 60-65 lalu turun
 """
 import logging
-import time
 from typing import Optional
 from dataclasses import dataclass
 
@@ -23,25 +26,23 @@ BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 
 @dataclass
 class SignalResult:
-    direction: str  # "UP" or "DOWN"
-    confidence: float  # 0.0 - 1.0
-    ema_slope: float
+    direction: str
+    confidence: float
+    ema_fast: float
+    ema_slow: float
     rsi: float
-    momentum: float
-    window_delta_pct: float
-    entry_price: float
+    prev_rsi: float
+    price: float
     analysis: str
 
 class SignalEngine:
-    def __init__(self, ema_period: int = 50, rsi_period: int = 14, atr_period: int = 14):
-        self.ema_period = ema_period
+    def __init__(self, ema_fast: int = 9, ema_slow: int = 21, rsi_period: int = 14, atr_period: int = 14):
+        self.ema_fast = ema_fast
+        self.ema_slow = ema_slow
         self.rsi_period = rsi_period
         self.atr_period = atr_period
-        self._klines_cache: Optional[pd.DataFrame] = None
-        self._cache_time = 0
 
     def _fetch_binance_klines(self, symbol: str = "BTCUSDT", interval: str = "1m", limit: int = 200) -> pd.DataFrame:
-        """Fetch 1-minute klines from Binance."""
         params = {"symbol": symbol, "interval": interval, "limit": limit}
         resp = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
         resp.raise_for_status()
@@ -59,9 +60,8 @@ class SignalEngine:
         return df
 
     def _fetch_yahoo_fallback(self, symbol: str = "BTC-USD", period: str = "1d", interval: str = "1m") -> pd.DataFrame:
-        """Fetch BTC data from Yahoo Finance as fallback."""
         if not YF_AVAILABLE:
-            raise ImportError("yfinance not installed. Install with: pip install yfinance")
+            raise ImportError("yfinance not installed")
 
         ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
@@ -74,7 +74,6 @@ class SignalEngine:
         return df
 
     def fetch_data(self) -> pd.DataFrame:
-        """Fetch data with Binance primary, Yahoo fallback."""
         try:
             df = self._fetch_binance_klines()
             logger.info("Binance data loaded | %d candles", len(df))
@@ -86,7 +85,7 @@ class SignalEngine:
                 logger.info("Yahoo Finance fallback loaded | %d candles", len(df))
                 return df
             except Exception as e2:
-                logger.error("Both Binance and Yahoo Finance failed: %s", str(e2))
+                logger.error("Both failed: %s", str(e2))
                 raise
 
     @staticmethod
@@ -104,115 +103,98 @@ class SignalEngine:
         rsi = 100 - (100 / (1 + rs))
         return rsi
 
-    @staticmethod
-    def calculate_atr(df: pd.DataFrame, period: int) -> pd.Series:
-        high_low = df["high"] - df["low"]
-        high_close = np.abs(df["high"] - df["close"].shift())
-        low_close = np.abs(df["low"] - df["close"].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        return tr.ewm(span=period, adjust=False).mean()
-
     def analyze(self) -> SignalResult:
         """
-        Main analysis pipeline:
-        1. Trend (EMA 50)
-        2. Timing (RSI pullback)
-        3. Confirmation (Momentum + Structure)
-        4. Filter (EMA slope, candle strength, RSI zone, break structure)
+        🟢 BUY:  Price > EMA21, EMA9 > EMA21, RSI turun 35-40 lalu mantul naik
+        🔴 SELL: Price < EMA21, EMA9 < EMA21, RSI naik 60-65 lalu turun
         """
         df = self.fetch_data()
 
         # Indicators
-        df["ema50"] = self.calculate_ema(df["close"], self.ema_period)
+        df["ema_fast"] = self.calculate_ema(df["close"], self.ema_fast)
+        df["ema_slow"] = self.calculate_ema(df["close"], self.ema_slow)
         df["rsi"] = self.calculate_rsi(df["close"], self.rsi_period)
-        df["atr"] = self.calculate_atr(df, self.atr_period)
 
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
+        # 3 candle terakhir
+        c_now = df.iloc[-1]
+        c_prev = df.iloc[-2]
+        c_prev2 = df.iloc[-3]
 
-        price = latest["close"]
-        ema = latest["ema50"]
-        rsi = latest["rsi"]
+        price = c_now["close"]
+        ema_f = c_now["ema_fast"]
+        ema_s = c_now["ema_slow"]
+        rsi = c_now["rsi"]
+        prev_rsi = c_prev["rsi"]
+        prev2_rsi = c_prev2["rsi"]
 
-        # EMA slope (last 5 candles)
-        ema_slope = (df["ema50"].iloc[-1] - df["ema50"].iloc[-5]) / df["ema50"].iloc[-5] * 100
+        # Trend
+        trend_up = price > ema_s and ema_f > ema_s
+        trend_down = price < ema_s and ema_f < ema_s
 
-        # Window delta (current vs window open - for 5m markets)
-        window_open = df["open"].iloc[-5]  # approx 5m ago
-        window_delta_pct = (price - window_open) / window_open * 100
+        # RSI Bounce Detection
+        rsi_bounce_buy = (
+            prev_rsi < 40 and
+            rsi > prev_rsi and
+            prev2_rsi > prev_rsi
+        )
 
-        # Momentum: last candle body / ATR
-        candle_body = abs(latest["close"] - latest["open"])
-        atr_val = latest["atr"] if latest["atr"] != 0 else 1e-9
-        momentum = candle_body / atr_val
+        rsi_bounce_sell = (
+            prev_rsi > 60 and
+            rsi < prev_rsi and
+            prev2_rsi < prev_rsi
+        )
 
-        # Break structure: close above/below previous high/low
-        prev_high = prev["high"]
-        prev_low = prev["low"]
-        break_up = latest["close"] > prev_high
-        break_down = latest["close"] < prev_low
-
-        # Trend Direction
-        trend_up = price > ema
-        trend_down = price < ema
-
-        # Timing (RSI Pullback)
-        rsi_pullback_buy = trend_up and rsi < 50
-        rsi_pullback_sell = trend_down and rsi > 50
-
-        # Filters
-        ema_clear = abs(ema_slope) > 0.01
-        strong_candle = momentum > 0.3
-
-        if rsi < 40:
-            rsi_zone = "oversold"
-        elif rsi > 60:
-            rsi_zone = "overbought"
-        else:
-            rsi_zone = "noise"
-
-        structure_break = break_up or break_down
+        # Candle direction
+        candle_up = c_now["close"] > c_now["open"]
+        candle_down = c_now["close"] < c_now["open"]
 
         # Decision
         direction = "NEUTRAL"
         confidence = 0.0
         analysis_parts = []
 
-        if trend_up and ema_clear:
-            analysis_parts.append(f"Trend UP | EMA slope {ema_slope:+.4f}%")
-            if rsi_pullback_buy and strong_candle and structure_break and break_up:
-                direction = "UP"
-                confidence = min(0.95, 0.5 + abs(window_delta_pct) * 10 + momentum * 0.1)
-                analysis_parts.append(f"RSI pullback {rsi:.1f} | Momentum {momentum:.2f} | Break UP")
-            elif rsi_zone == "oversold" and break_up:
-                direction = "UP"
-                confidence = 0.6
-                analysis_parts.append(f"RSI oversold {rsi:.1f} | Break UP")
+        if trend_up:
+            analysis_parts.append(f"Trend UP | EMA{self.ema_fast}({ema_f:.2f}) > EMA{self.ema_slow}({ema_s:.2f})")
 
-        elif trend_down and ema_clear:
-            analysis_parts.append(f"Trend DOWN | EMA slope {ema_slope:+.4f}%")
-            if rsi_pullback_sell and strong_candle and structure_break and break_down:
+            if rsi_bounce_buy and candle_up:
+                direction = "UP"
+                depth = max(0, 40 - prev_rsi)
+                strength = rsi - prev_rsi
+                confidence = min(0.95, 0.6 + (depth * 0.01) + (strength * 0.02))
+                analysis_parts.append(f"RSI bounce {prev_rsi:.1f} -> {rsi:.1f} | Candle UP")
+            elif rsi_bounce_buy and not candle_up:
+                analysis_parts.append(f"RSI bounce detected but candle belum naik | wait")
+            else:
+                analysis_parts.append(f"RSI {rsi:.1f} (prev {prev_rsi:.1f}) | Waiting bounce 35-40")
+
+        elif trend_down:
+            analysis_parts.append(f"Trend DOWN | EMA{self.ema_fast}({ema_f:.2f}) < EMA{self.ema_slow}({ema_s:.2f})")
+
+            if rsi_bounce_sell and candle_down:
                 direction = "DOWN"
-                confidence = min(0.95, 0.5 + abs(window_delta_pct) * 10 + momentum * 0.1)
-                analysis_parts.append(f"RSI pullback {rsi:.1f} | Momentum {momentum:.2f} | Break DOWN")
-            elif rsi_zone == "overbought" and break_down:
-                direction = "DOWN"
-                confidence = 0.6
-                analysis_parts.append(f"RSI overbought {rsi:.1f} | Break DOWN")
+                height = max(0, prev_rsi - 60)
+                strength = prev_rsi - rsi
+                confidence = min(0.95, 0.6 + (height * 0.01) + (strength * 0.02))
+                analysis_parts.append(f"RSI reject {prev_rsi:.1f} -> {rsi:.1f} | Candle DOWN")
+            elif rsi_bounce_sell and not candle_down:
+                analysis_parts.append(f"RSI reject detected but candle belum turun | wait")
+            else:
+                analysis_parts.append(f"RSI {rsi:.1f} (prev {prev_rsi:.1f}) | Waiting reject 60-65")
         else:
-            analysis_parts.append(f"Sideways/unclear | EMA slope {ema_slope:+.4f}% | RSI {rsi:.1f}")
+            analysis_parts.append(
+                f"Sideways | Price {price:.2f} vs EMA{self.ema_slow} {ema_s:.2f} | EMA{self.ema_fast} {ema_f:.2f}"
+            )
 
         analysis = " | ".join(analysis_parts)
-
         logger.info("ANALYSIS: %s | Confidence: %.2f | %s", direction, confidence, analysis)
 
         return SignalResult(
             direction=direction,
             confidence=confidence,
-            ema_slope=ema_slope,
+            ema_fast=ema_f,
+            ema_slow=ema_s,
             rsi=rsi,
-            momentum=momentum,
-            window_delta_pct=window_delta_pct,
-            entry_price=price,
+            prev_rsi=prev_rsi,
+            price=price,
             analysis=analysis
         )
