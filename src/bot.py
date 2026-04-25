@@ -102,8 +102,9 @@ def render_scan_dashboard(
     table.add_row("📊 Direction", f"[{sig_color}]{signal.direction}[/{sig_color}]")
     table.add_row("🎯 Confidence", f"{signal.confidence*100:.1f}%")
     table.add_row("📈 RSI", f"{signal.rsi:.1f}")
-    table.add_row("📉 EMA Slope", f"{signal.ema_slope:+.4f}%")
-    table.add_row("📊 Window Δ", f"{signal.window_delta_pct:+.4f}%")
+    table.add_row("📈 EMA Fast", f"{signal.ema_fast:.2f}")
+table.add_row("📉 EMA Slow", f"{signal.ema_slow:.2f}")
+table.add_row("📊 Prev RSI", f"{signal.prev_rsi:.1f}")
     table.add_row("")
     
     if market:
