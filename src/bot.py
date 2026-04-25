@@ -2,6 +2,8 @@
 Polymarket BTC Up/Down 5-Minute Trading Bot
 
 STRATEGY: EMA 9/21 Crossover + RSI 14 Bounce
+🟢 BUY:  Price > EMA21, EMA9 > EMA21, RSI turun ke 35-40 lalu mantul naik
+🔴 SELL: Price < EMA21, EMA9 < EMA21, RSI naik ke 60-65 lalu turun
 """
 import os
 import sys
@@ -50,56 +52,78 @@ logger = logging.getLogger(__name__)
 # UI HELPERS
 # ==================================================================
 
-def make_bar(value: float, max_val: float = 100, width: int = 16, color: str = "green") -> str:
-    filled = int(width * min(value, max_val) / max_val)
-    empty = width - filled
-    bar = f"[{'█' * filled}{'░' * empty}]"
-    return f"[{color}]{bar}[/{color}] {value:.1f}"
-
-def make_countdown_bar(remaining: int, total: int = 300, width: int = 20) -> str:
+def make_countdown_bar(remaining: int, total: int = 300, width: int = 30) -> str:
+    """Progress bar countdown dengan warna dinamis."""
     elapsed = total - remaining
     pct = elapsed / total
     filled = int(width * pct)
     empty = width - filled
-    if pct < 0.5:
+    
+    if pct < 0.33:
         color = "green"
-    elif pct < 0.8:
+    elif pct < 0.66:
         color = "yellow"
     else:
         color = "red"
+    
     bar = f"[{'█' * filled}{'░' * empty}]"
     mins, secs = divmod(remaining, 60)
-    return f"[{color}]{bar}[/{color}] [bold]{mins:02d}:{secs:02d}[/bold]"
+    return f"[{color}]{bar}[/{color}] [bold white]{mins:02d}:{secs:02d}[/bold white]"
 
-def rsi_gauge(rsi: float) -> str:
-    if rsi < 30:
-        return f"[cyan]◄───[/cyan] [green]{rsi:.1f}[/green] [cyan]───►[/cyan] [bold green]OVERSOLD[/bold green]"
-    elif rsi < 40:
-        return f"[cyan]◄───[/cyan] [yellow]{rsi:.1f}[/yellow] [cyan]───►[/cyan] [bold yellow]BUY ZONE[/bold yellow]"
-    elif rsi < 45:
-        return f"[cyan]◄───[/cyan] [dim]{rsi:.1f}[/dim] [cyan]───►[/cyan] NEUTRAL-LOW"
-    elif rsi <= 55:
-        return f"[cyan]◄───[/cyan] [white]{rsi:.1f}[/white] [cyan]───►[/cyan] NEUTRAL"
-    elif rsi <= 60:
-        return f"[cyan]◄───[/cyan] [dim]{rsi:.1f}[/dim] [cyan]───►[/cyan] NEUTRAL-HIGH"
-    elif rsi <= 65:
-        return f"[cyan]◄───[/cyan] [yellow]{rsi:.1f}[/yellow] [cyan]───►[/cyan] [bold yellow]SELL ZONE[/bold yellow]"
+def make_progress_bar(elapsed: int, total: int = 300, width: int = 30) -> str:
+    """Progress bar untuk window close (elapsed = filled)."""
+    pct = elapsed / total
+    filled = int(width * pct)
+    empty = width - filled
+    
+    if pct < 0.33:
+        color = "green"
+    elif pct < 0.66:
+        color = "yellow"
     else:
-        return f"[cyan]◄───[/cyan] [red]{rsi:.1f}[/red] [cyan]───►[/cyan] [bold red]OVERBOUGHT[/bold red]"
+        color = "red"
+    
+    bar = f"[{'█' * filled}{'░' * empty}]"
+    mins, secs = divmod(total - elapsed, 60)
+    return f"[{color}]{bar}[/{color}] [bold white]{mins:02d}:{secs:02d}[/bold white]"
 
-def ema_status(price: float, ema_fast: float, ema_slow: float) -> tuple:
+def rsi_status(rsi: float, prev_rsi: float) -> tuple:
+    """Return (label, color, arrow)."""
+    if rsi < 30:
+        return "OVERSOLD", "green", "↑"
+    elif rsi < 35:
+        return "DEEP BUY", "green", "↑"
+    elif rsi < 40 and rsi > prev_rsi:
+        return "BOUNCE UP", "green", "↑"
+    elif rsi < 40:
+        return "BUY ZONE", "yellow", "→"
+    elif rsi <= 45:
+        return "NEUTRAL-LOW", "dim", "→"
+    elif rsi <= 55:
+        return "NEUTRAL", "white", "→"
+    elif rsi <= 60:
+        return "NEUTRAL-HIGH", "dim", "→"
+    elif rsi > 65 and rsi < prev_rsi:
+        return "REJECT DOWN", "red", "↓"
+    elif rsi > 60:
+        return "SELL ZONE", "yellow", "→"
+    else:
+        return "OVERBOUGHT", "red", "↓"
+
+def ema_trend(price: float, ema_fast: float, ema_slow: float) -> tuple:
+    """Return (label, color, emoji)."""
     if price > ema_fast > ema_slow:
         diff = (ema_fast - ema_slow) / ema_slow * 100
-        return f"BULLISH +{diff:.3f}%", "green", "🟢"
+        return f"BULLISH (+{diff:.3f}%)", "green", "🟢"
     elif price < ema_fast < ema_slow:
         diff = (ema_slow - ema_fast) / ema_slow * 100
-        return f"BEARISH -{diff:.3f}%", "red", "🔴"
+        return f"BEARISH (-{diff:.3f}%)", "red", "🔴"
     elif ema_fast > ema_slow:
         return "CROSSING UP", "yellow", "🟡"
     else:
         return "CROSSING DOWN", "yellow", "🟡"
 
-def format_badge(direction: str, confidence: float) -> tuple:
+def signal_badge(direction: str, confidence: float) -> tuple:
     if direction == "UP" and confidence >= 0.7:
         return "🟢 STRONG BUY", "green"
     elif direction == "UP" and confidence >= 0.6:
@@ -117,8 +141,7 @@ def format_badge(direction: str, confidence: float) -> tuple:
 # RENDERERS
 # ==================================================================
 
-def render_dashboard(
-    state: str,
+def render_scan_dashboard(
     balance: float,
     signal: SignalResult,
     market: Optional[MarketInfo],
@@ -126,119 +149,194 @@ def render_dashboard(
     wins: int,
     losses: int,
     total_pnl: float,
-    runtime: str,
-    entry_side: Optional[str] = None,
-    entry_amount: float = 0.0,
-    entry_price: float = 0.0,
+    runtime: str
 ) -> Panel:
-    """Render dashboard utama - 1 panel besar dengan table 3 kolom."""
-    
-    state_colors = {"SCANNING": "blue", "IN_POSITION": "green", "ERROR": "red"}
-    sc = state_colors.get(state, "white")
-    
-    # Header
-    header_text = Text()
-    header_text.append("🤖 ", style="bold")
-    header_text.append("POLYMARKET BTC 5M BOT", style="bold white")
-    header_text.append("  │  ", style="dim")
-    header_text.append(f"State: ", style="dim")
-    header_text.append(f"{state}", style=f"bold {sc}")
-    header_text.append("  │  ", style="dim")
-    header_text.append(f"Runtime: {runtime}", style="dim")
-    
-    # Main Table (3 columns)
-    main_table = Table(show_header=False, box=None, padding=(0, 1))
-    main_table.add_column("col1", ratio=1)
-    main_table.add_column("col2", ratio=1)
-    main_table.add_column("col3", ratio=1)
-    
-    # ===== COL 1: MARKET =====
-    t1 = Table(show_header=False, box=None, padding=(0, 0))
-    t1.add_column("k", style="bold cyan", width=10)
-    t1.add_column("v")
+    """Render dashboard SCAN mode - single panel vertical layout."""
     
     now = int(time.time())
-    sec_next = max(0, next_epoch - now)
+    seconds_to_next = max(0, next_epoch - now)
     
+    sig_emoji, sig_text, sig_color = signal_badge(signal.direction, signal.confidence)
+    rsi_label, rsi_color, rsi_arrow = rsi_status(signal.rsi, signal.prev_rsi)
+    ema_label, ema_color, ema_emoji = ema_trend(signal.price, signal.ema_fast, signal.ema_slow)
+    
+    total_trades = wins + losses
+    wr = (wins / total_trades * 100) if total_trades > 0 else 0
+    pnl_color = "green" if total_pnl >= 0 else "red"
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    
+    # Build content table
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("icon", style="bold", width=3)
+    table.add_column("key", style="bold cyan", width=20)
+    table.add_column("value", style="white")
+    
+    # Header row
+    table.add_row("", "", "")
+    table.add_row("🤖", "BOT", "[bold white]POLYMARKET BTC 5M BOT[/bold white]  [dim]│[/dim]  [dim]Runtime: " + runtime + "[/dim]")
+    table.add_row("", "Mode", "[bold blue]SCANNING MARKET[/bold blue]")
+    table.add_row("", "", "")
+    
+    # Separator
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Account section
+    table.add_row("💰", "Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
+    table.add_row("📈", "Wins", f"[green]{wins}[/green]")
+    table.add_row("📉", "Losses", f"[red]{losses}[/red]")
+    table.add_row("📊", "Win Rate", f"[bold]{wr:.1f}%[/bold]  ([dim]{total_trades} trades[/dim])")
+    table.add_row("💵", "Total PnL", f"[bold {pnl_color}]{pnl_sign}${total_pnl:.2f}[/{pnl_color}]")
+    table.add_row("", "", "")
+    
+    # Separator
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Signal section
+    table.add_row("📡", "Source", "[dim]Binance API (Yahoo Fallback)[/dim]")
+    table.add_row("📊", "Direction", f"[bold {sig_color}]{signal.direction}[/{sig_color}]")
+    table.add_row("🎯", "Confidence", f"[bold {sig_color}]{signal.confidence*100:.1f}%[/bold {sig_color}]")
+    table.add_row("", "", "")
+    
+    # EMA section
+    table.add_row(f"{ema_emoji}", "EMA Trend", f"[{ema_color}]{ema_label}[/{ema_color}]")
+    table.add_row("📈", "EMA 9", f"{signal.ema_fast:.2f}")
+    table.add_row("📉", "EMA 21", f"{signal.ema_slow:.2f}")
+    table.add_row("💰", "Price", f"{signal.price:.2f}")
+    table.add_row("", "", "")
+    
+    # RSI section
+    table.add_row("📈", "RSI 14", f"[bold {rsi_color}]{signal.rsi:.1f} {rsi_arrow}[/{rsi_color}]  ([dim]prev: {signal.prev_rsi:.1f}[/dim])")
+    table.add_row("📊", "RSI Status", f"[{rsi_color}]{rsi_label}[/{rsi_color}]")
+    table.add_row("", "", "")
+    
+    # Separator
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Market section
     if market:
-        t1.add_row("🎰 Slug", f"[dim]{market.slug}[/dim]")
-        t1.add_row("💵 UP", f"[green bold]{market.up_price:.4f}[/green bold]")
-        t1.add_row("💵 DOWN", f"[red bold]{market.down_price:.4f}[/red bold]")
-        t1.add_row("🔒 Status", "[red]RESOLVED[/red]" if market.resolved else "[green]ACTIVE[/green]")
-        if market.outcome:
-            t1.add_row("🏆 Win", f"[bold]{market.outcome}[/bold]")
+        table.add_row("🎰", "Market", f"[dim]{market.slug}[/dim]")
+        table.add_row("💵", "UP Price", f"[green bold]{market.up_price:.4f}[/green bold]")
+        table.add_row("💵", "DOWN Price", f"[red bold]{market.down_price:.4f}[/red bold]")
+        table.add_row("🔒", "Resolved", "[bold red]YES[/bold red]" if market.resolved else "[bold green]NO[/bold green]")
     else:
-        t1.add_row("🎰 Status", "[dim]Waiting...[/dim]")
+        table.add_row("🎰", "Market", "[dim]Waiting for next window...[/dim]")
     
-    t1.add_row("⏳ Next", make_countdown_bar(sec_next, 300))
-    p1 = Panel(t1, title="[bold blue]📊 MARKET[/bold blue]", border_style="blue", box=box.ROUNDED, padding=(0, 1))
+    table.add_row("", "", "")
     
-    # ===== COL 2: SIGNAL =====
-    badge, bc = format_badge(signal.direction, signal.confidence)
+    # Countdown
+    countdown = make_countdown_bar(seconds_to_next, 300)
+    table.add_row("⏳", "Next Window", f"[bold yellow]{countdown}[/bold yellow]")
     
-    t2 = Table(show_header=False, box=None, padding=(0, 0))
-    t2.add_column("k", style="bold cyan", width=10)
-    t2.add_column("v")
+    # Separator
+    table.add_row("", "", "")
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
     
-    t2.add_row("📊 Signal", f"[bold {bc}]{badge}[/bold {bc}]")
-    t2.add_row("🎯 Conf", make_bar(signal.confidence * 100, 100, 16, bc))
-    t2.add_row("", "")
-    
-    ema_txt, ema_c, ema_e = ema_status(signal.price, signal.ema_fast, signal.ema_slow)
-    t2.add_row(f"{ema_e} Trend", f"[{ema_c}]{ema_txt}[/{ema_c}]")
-    t2.add_row("📈 EMA 9", f"{signal.ema_fast:.2f}")
-    t2.add_row("📉 EMA 21", f"{signal.ema_slow:.2f}")
-    t2.add_row("💰 Price", f"{signal.price:.2f}")
-    t2.add_row("", "")
-    t2.add_row("📈 RSI", rsi_gauge(signal.rsi))
-    t2.add_row("📊 Prev", f"{signal.prev_rsi:.1f}")
-    
-    border_c = bc if signal.direction in ("UP", "DOWN") else "white"
-    p2 = Panel(t2, title="[bold]📡 SIGNAL[/bold]", border_style=border_c, box=box.ROUNDED, padding=(0, 1))
-    
-    # ===== COL 3: ACCOUNT / POSITION =====
-    t3 = Table(show_header=False, box=None, padding=(0, 0))
-    t3.add_column("k", style="bold cyan", width=10)
-    t3.add_column("v")
-    
-    t3.add_row("💰 Balance", f"[bold green]${balance:.2f}[/bold green]")
-    t3.add_row("", "")
-    total = wins + losses
-    wr = (wins / total * 100) if total > 0 else 0
-    pnl_c = "green" if total_pnl >= 0 else "red"
-    pnl_s = "+" if total_pnl >= 0 else ""
-    t3.add_row("📈 Wins", f"[green]{wins}[/green]")
-    t3.add_row("📉 Losses", f"[red]{losses}[/red]")
-    t3.add_row("📊 WR", f"[bold]{wr:.1f}%[/bold]")
-    t3.add_row("💵 PnL", f"[bold {pnl_c}]{pnl_s}${total_pnl:.2f}[/{pnl_c}]")
-    
-    if state == "IN_POSITION" and entry_side:
-        t3.add_row("", "")
-        ec = "green" if entry_side == "UP" else "red"
-        ee = "🟢" if entry_side == "UP" else "🔴"
-        t3.add_row(f"{ee} Side", f"[bold {ec}]{entry_side}[/{ec}]")
-        t3.add_row("💵 Entry", f"${entry_amount:.2f} @ {entry_price:.4f}")
-        
-        entered = int(market.slug.split("-")[-1]) if market else 0
-        rem = max(0, entered + 300 - now)
-        t3.add_row("⏳ Close", make_countdown_bar(rem, 300))
-    
-    p3 = Panel(t3, title="[bold green]💼 ACCOUNT[/bold green]", border_style="green", box=box.ROUNDED, padding=(0, 1))
-    
-    main_table.add_row(p1, p2, p3)
-    
-    # Footer
-    footer = Text(f"⏱️  {datetime.now().strftime('%H:%M:%S')}  │  Ctrl+C to stop", style="dim")
-    
-    content = Group(header_text, Text("─" * 78, style="dim"), main_table, Text("─" * 78, style="dim"), footer)
+    # Footer row
+    table.add_row(f"{sig_emoji}", "Status", f"[bold {sig_color}]{sig_text}[/{sig_color}]  [dim]•  {datetime.now().strftime('%H:%M:%S')}[dim]")
+    table.add_row("", "", "")
     
     return Panel(
-        content,
-        border_style=sc,
+        table,
+        border_style="blue",
         box=box.ROUNDED,
-        padding=(1, 2),
-        title=f"[bold {sc}]BTC 5M BOT[/bold {sc}]",
-        title_align="center"
+        padding=(0, 2),
+        title=f"[bold blue]SCAN MODE[/bold blue]",
+        title_align="left",
+        subtitle=f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
+        subtitle_align="right"
+    )
+
+
+def render_monitor_dashboard(
+    balance: float,
+    market: MarketInfo,
+    entry_side: str,
+    entry_amount: float,
+    entry_price: float,
+    wins: int,
+    losses: int,
+    total_pnl: float,
+    runtime: str
+) -> Panel:
+    """Render dashboard MONITOR mode - single panel vertical layout."""
+    
+    now = int(time.time())
+    entered_epoch = int(market.slug.split("-")[-1])
+    window_end = entered_epoch + 300
+    remaining = max(0, window_end - now)
+    elapsed = 300 - remaining
+    
+    side_color = "green" if entry_side == "UP" else "red"
+    side_emoji = "🟢" if entry_side == "UP" else "🔴"
+    
+    total_trades = wins + losses
+    wr = (wins / total_trades * 100) if total_trades > 0 else 0
+    pnl_color = "green" if total_pnl >= 0 else "red"
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("icon", style="bold", width=3)
+    table.add_column("key", style="bold cyan", width=20)
+    table.add_column("value", style="white")
+    
+    # Header
+    table.add_row("", "", "")
+    table.add_row("🤖", "BOT", "[bold white]POLYMARKET BTC 5M BOT[/bold white]  [dim]│[/dim]  [dim]Runtime: " + runtime + "[/dim]")
+    table.add_row("", "Mode", "[bold green]MONITORING POSITION[/bold green]")
+    table.add_row("", "", "")
+    
+    # Separator
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Account
+    table.add_row("💰", "Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
+    table.add_row("📈", "Wins", f"[green]{wins}[/green]")
+    table.add_row("📉", "Losses", f"[red]{losses}[/red]")
+    table.add_row("📊", "Win Rate", f"[bold]{wr:.1f}%[/bold]")
+    table.add_row("💵", "Total PnL", f"[bold {pnl_color}]{pnl_sign}${total_pnl:.2f}[/{pnl_color}]")
+    table.add_row("", "", "")
+    
+    # Separator
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Position
+    table.add_row(f"{side_emoji}", "Entry Side", f"[bold {side_color}]{entry_side}[/{side_color}]")
+    table.add_row("💵", "Entry Amount", f"[bold]${entry_amount:.2f}[/bold] USDC")
+    table.add_row("💵", "Entry Price", f"{entry_price:.4f}")
+    table.add_row("🎰", "Market", f"[dim]{market.slug}[/dim]")
+    table.add_row("", "", "")
+    
+    # Progress
+    progress = make_progress_bar(elapsed, 300)
+    table.add_row("⏳", "Window Close", f"[bold yellow]{progress}[/bold yellow]")
+    
+    mins, secs = divmod(remaining, 60)
+    table.add_row("⏱️ ", "Remaining", f"[bold]{mins:02d}:{secs:02d}[/bold]")
+    
+    # Separator
+    table.add_row("", "", "")
+    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", "")
+    
+    # Footer
+    table.add_row(f"{side_emoji}", "Status", f"[bold {side_color}]POSITION OPEN[/{side_color}]  [dim]•  Waiting resolution...  •  {datetime.now().strftime('%H:%M:%S')}[dim]")
+    table.add_row("", "", "")
+    
+    return Panel(
+        table,
+        border_style="green",
+        box=box.ROUNDED,
+        padding=(0, 2),
+        title=f"[bold green]MONITOR MODE[/bold green]",
+        title_align="left",
+        subtitle=f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
+        subtitle_align="right"
     )
 
 
@@ -291,9 +389,8 @@ class BTC5mBot:
         elapsed = int(time.time() - self._start_time)
         return str(timedelta(seconds=elapsed))
     
-    def _build_panel(self) -> Panel:
-        return render_dashboard(
-            self.state,
+    def _build_scan_panel(self) -> Panel:
+        return render_scan_dashboard(
             self._last_balance,
             self._last_signal or SignalResult("NEUTRAL", 0, 0, 0, 50, 50, 0, "Loading..."),
             self._last_market,
@@ -301,10 +398,22 @@ class BTC5mBot:
             self._wins,
             self._losses,
             self._total_pnl,
-            self._get_runtime(),
-            self.entry_side,
+            self._get_runtime()
+        )
+    
+    def _build_monitor_panel(self) -> Panel:
+        if not self.current_market:
+            return self._build_scan_panel()
+        return render_monitor_dashboard(
+            self._last_balance,
+            self.current_market,
+            self.entry_side or "UNKNOWN",
             self.entry_amount,
             self.entry_price,
+            self._wins,
+            self._losses,
+            self._total_pnl,
+            self._get_runtime()
         )
     
     def scan(self) -> bool:
@@ -426,7 +535,7 @@ class BTC5mBot:
         console.print("[bold blue]🔄 SCANNING[/bold blue]\n")
     
     def run(self):
-        """Main loop dengan Rich Live - 1 panel yang di-refresh."""
+        """Main loop dengan Rich Live - single panel vertical layout."""
         
         # Init data
         self._last_balance = self.trader.get_usdc_balance()
@@ -438,7 +547,7 @@ class BTC5mBot:
         self._last_market = self.trader.discover_btc_5m_market(self.get_current_5m_epoch())
         
         # Live display
-        with Live(self._build_panel(), refresh_per_second=2, console=console, screen=False) as live:
+        with Live(self._build_scan_panel(), refresh_per_second=2, console=console, screen=False) as live:
             self._live = live
             
             while True:
@@ -447,7 +556,7 @@ class BTC5mBot:
                         self.trader.redeem_all_positions()
                         valid = self.scan()
                         
-                        live.update(self._build_panel())
+                        live.update(self._build_scan_panel())
                         
                         if valid:
                             live.stop()
@@ -455,7 +564,7 @@ class BTC5mBot:
                             
                             success = self.enter_position()
                             
-                            live = Live(self._build_panel(), refresh_per_second=2, console=console, screen=False)
+                            live = Live(self._build_monitor_panel(), refresh_per_second=2, console=console, screen=False)
                             live.start()
                             self._live = live
                             
@@ -467,7 +576,7 @@ class BTC5mBot:
                     elif self.state == "IN_POSITION":
                         resolved = self.monitor_position()
                         
-                        live.update(self._build_panel())
+                        live.update(self._build_monitor_panel())
                         
                         if resolved:
                             live.stop()
@@ -475,7 +584,7 @@ class BTC5mBot:
                             
                             self.redeem_and_reset()
                             
-                            live = Live(self._build_panel(), refresh_per_second=2, console=console, screen=False)
+                            live = Live(self._build_scan_panel(), refresh_per_second=2, console=console, screen=False)
                             live.start()
                             self._live = live
                         else:
@@ -495,7 +604,7 @@ class BTC5mBot:
                         self._live.stop()
                     console.print(f"[bold red]⚠️  Error: {e}[/bold red]")
                     time.sleep(10)
-                    live = Live(self._build_panel(), refresh_per_second=2, console=console, screen=False)
+                    live = Live(self._build_scan_panel(), refresh_per_second=2, console=console, screen=False)
                     live.start()
                     self._live = live
 
