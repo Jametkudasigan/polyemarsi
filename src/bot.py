@@ -189,10 +189,11 @@ class BTC5mBot:
     def __init__(self, config: BotConfig):
         self.config = config
         self.signal_engine = SignalEngine(
-            ema_period=config.ema_period,
-            rsi_period=config.rsi_period,
-            atr_period=config.atr_period
-        )
+    ema_fast=config.ema_fast,
+    ema_slow=config.ema_slow,
+    rsi_period=config.rsi_period,
+    atr_period=config.atr_period
+)
         self.trader = PolymarketTrader(
             private_key=config.private_key,
             proxy_address=config.proxy_address,
