@@ -6,6 +6,10 @@ Flow:
 2. ENTRY: Place FOK market order on Polymarket (Up/Down token)
 3. MONITORING: Wait for market resolution
 4. REDEEM: Auto cash out winning positions -> back to SCANNING
+
+STRATEGY: EMA 9/21 Crossover + RSI 14 Bounce
+🟢 BUY:  Price > EMA21, EMA9 > EMA21, RSI turun ke 35-40 lalu mantul naik, candle naik
+🔴 SELL: Price < EMA21, EMA9 < EMA21, RSI naik ke 60-65 lalu turun, candle turun
 """
 import os
 import sys
@@ -102,9 +106,9 @@ def render_scan_dashboard(
     table.add_row("📊 Direction", f"[{sig_color}]{signal.direction}[/{sig_color}]")
     table.add_row("🎯 Confidence", f"{signal.confidence*100:.1f}%")
     table.add_row("📈 RSI", f"{signal.rsi:.1f}")
+    table.add_row("📊 Prev RSI", f"{signal.prev_rsi:.1f}")
     table.add_row("📈 EMA Fast", f"{signal.ema_fast:.2f}")
-table.add_row("📉 EMA Slow", f"{signal.ema_slow:.2f}")
-table.add_row("📊 Prev RSI", f"{signal.prev_rsi:.1f}")
+    table.add_row("📉 EMA Slow", f"{signal.ema_slow:.2f}")
     table.add_row("")
     
     if market:
@@ -190,11 +194,11 @@ class BTC5mBot:
     def __init__(self, config: BotConfig):
         self.config = config
         self.signal_engine = SignalEngine(
-    ema_fast=config.ema_fast,
-    ema_slow=config.ema_slow,
-    rsi_period=config.rsi_period,
-    atr_period=config.atr_period
-)
+            ema_fast=config.ema_fast,
+            ema_slow=config.ema_slow,
+            rsi_period=config.rsi_period,
+            atr_period=config.atr_period
+        )
         self.trader = PolymarketTrader(
             private_key=config.private_key,
             proxy_address=config.proxy_address,
@@ -208,7 +212,6 @@ class BTC5mBot:
         self.entry_amount: float = 0.0
         self.entry_price: float = 0.0
         
-        # Live display state
         self._live: Optional[Live] = None
         self._last_balance: float = 0.0
         self._last_signal: Optional[SignalResult] = None
@@ -224,16 +227,14 @@ class BTC5mBot:
         return ((now // 300) + 1) * 300
     
     def _build_scan_panel(self) -> Panel:
-        """Build scan panel dari cached data (untuk Live refresh)."""
         return render_scan_dashboard(
             self._last_balance,
-            self._last_signal or SignalResult("NEUTRAL", 0, 0, 50, 0, 0, 0, "Loading..."),
+            self._last_signal or SignalResult("NEUTRAL", 0, 0, 0, 50, 50, 0, "Loading..."),
             self._last_market,
             self._last_next_epoch
         )
     
     def _build_monitor_panel(self) -> Panel:
-        """Build monitor panel dari cached data."""
         if not self.current_market:
             return self._build_scan_panel()
         return render_monitor_dashboard(
@@ -245,15 +246,12 @@ class BTC5mBot:
         )
     
     def scan(self) -> bool:
-        """
-        Scanning phase - update cached data, return True kalau valid signal.
-        """
         self._last_balance = self.trader.get_usdc_balance()
         
         try:
             signal = self.signal_engine.analyze()
         except Exception as e:
-            signal = SignalResult("NEUTRAL", 0, 0, 50, 0, 0, 0, f"Error: {e}")
+            signal = SignalResult("NEUTRAL", 0, 0, 0, 50, 50, 0, f"Error: {e}")
         
         self._last_signal = signal
         
@@ -262,7 +260,6 @@ class BTC5mBot:
         market = self.trader.discover_btc_5m_market(epoch)
         self._last_market = market
         
-        # Validation
         if self._last_balance < self.config.min_entry_usdc:
             return False
         
@@ -283,12 +280,10 @@ class BTC5mBot:
         if not (self.config.odds_min <= target_price <= self.config.odds_max):
             return False
         
-        # Valid signal found
         self.current_market = market
         self.entry_side = signal.direction
         self.entry_price = target_price
         
-        # Print entry notification (sekali aja, tidak di-loop)
         console.print(f"\n[bold green]✅ VALID SIGNAL | {signal.direction} @ {target_price:.4f} | Confidence: {signal.confidence:.0%}[/bold green]")
         
         return True
@@ -318,7 +313,6 @@ class BTC5mBot:
             return False
     
     def monitor_position(self) -> bool:
-        """Check if market resolved. Update balance cache."""
         if not self.current_market:
             return False
         
@@ -356,61 +350,47 @@ class BTC5mBot:
         
         console.print("[bold blue]🔄 Back to SCANNING[/bold blue]\n")
     
-    # ==================================================================
-    # MAIN LOOP - DENGAN LIVE DISPLAY (TIDAK SPAM)
-    # ==================================================================
-    
     def run(self):
-        """Main loop dengan Rich Live display - 1 screen yang di-refresh, tidak spam."""
-        
-        # Print banner sekali
         console.print(Panel(
             "[bold white]POLYMARKET BTC 5-MINUTE TRADING BOT[/bold white]\n"
-            "[dim]Strategy: EMA50 + RSI Pullback + Momentum Confirmation[/dim]",
+            "[dim]Strategy: EMA 9/21 + RSI 14 Bounce[/dim]",
             border_style="blue",
             box=box.DOUBLE,
             padding=(1, 4)
         ))
         console.print(f"[dim]Proxy: {self.config.proxy_address[:20]}...[/dim]\n")
         
-        # Inisialisasi data pertama
         self._last_balance = self.trader.get_usdc_balance()
         try:
             self._last_signal = self.signal_engine.analyze()
         except:
-            self._last_signal = SignalResult("NEUTRAL", 0, 0, 50, 0, 0, 0, "Loading...")
+            self._last_signal = SignalResult("NEUTRAL", 0, 0, 0, 50, 50, 0, "Loading...")
         self._last_next_epoch = self.get_next_5m_epoch()
         self._last_market = self.trader.discover_btc_5m_market(self.get_current_5m_epoch())
         
-        # Gunakan Rich Live untuk refresh 1 screen
         with Live(self._build_scan_panel(), refresh_per_second=1, console=console) as live:
             self._live = live
             
             while True:
                 try:
                     if self.state == "SCANNING":
-                        # Update data
                         self.trader.redeem_all_positions()
                         
                         valid = self.scan()
                         
-                        # Refresh display
                         live.update(self._build_scan_panel())
                         
                         if valid:
-                            # Hentikan Live sebelum print notifikasi entry
                             live.stop()
                             self._live = None
                             
                             success = self.enter_position()
                             
                             if success:
-                                # Restart Live dalam mode MONITOR
                                 live = Live(self._build_monitor_panel(), refresh_per_second=1, console=console)
                                 live.start()
                                 self._live = live
                             else:
-                                # Restart Live dalam mode SCAN
                                 live = Live(self._build_scan_panel(), refresh_per_second=1, console=console)
                                 live.start()
                                 self._live = live
@@ -421,19 +401,16 @@ class BTC5mBot:
                     elif self.state == "IN_POSITION":
                         resolved = self.monitor_position()
                         
-                        # Refresh display
                         if self._live:
                             self._live.update(self._build_monitor_panel())
                         
                         if resolved:
-                            # Hentikan Live sebelum redeem
                             if self._live:
                                 self._live.stop()
                                 self._live = None
                             
                             self.redeem_and_reset()
                             
-                            # Restart Live dalam mode SCAN
                             live = Live(self._build_scan_panel(), refresh_per_second=1, console=console)
                             live.start()
                             self._live = live
@@ -454,7 +431,6 @@ class BTC5mBot:
                         self._live.stop()
                     console.print(f"[bold red]⚠️  Error: {e}[/bold red]")
                     time.sleep(10)
-                    # Restart Live
                     live = Live(self._build_scan_panel(), refresh_per_second=1, console=console)
                     live.start()
                     self._live = live
