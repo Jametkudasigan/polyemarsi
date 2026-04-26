@@ -2,8 +2,6 @@
 Polymarket BTC Up/Down 5-Minute Trading Bot
 
 STRATEGY: EMA 9/21 Crossover + RSI 14 Bounce
-🟢 BUY:  Price > EMA21, EMA9 > EMA21, RSI turun ke 35-40 lalu mantul naik
-🔴 SELL: Price < EMA21, EMA9 < EMA21, RSI naik ke 60-65 lalu turun
 """
 import os
 import sys
@@ -12,9 +10,6 @@ import logging
 from typing import Optional
 from datetime import datetime, timedelta
 
-# ------------------------------------------------------------------
-# Rich UI Imports
-# ------------------------------------------------------------------
 try:
     from rich.console import Console, Group
     from rich.panel import Panel
@@ -30,9 +25,6 @@ except ImportError:
 
 console = Console()
 
-# ------------------------------------------------------------------
-# Polymarket / Config Imports
-# ------------------------------------------------------------------
 try:
     from src.config import load_config, BotConfig
     from src.signals import SignalEngine, SignalResult
@@ -42,17 +34,11 @@ except ModuleNotFoundError:
     from signals import SignalEngine, SignalResult
     from polymarket import PolymarketTrader, MarketInfo
 
-# ------------------------------------------------------------------
-# Logging
-# ------------------------------------------------------------------
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================================================================
-# UI HELPERS
-# ==================================================================
 
-def make_countdown_bar(remaining: int, total: int = 300, width: int = 30) -> str:
+def make_countdown_bar(remaining: int, total: int = 300, width: int = 28) -> str:
     elapsed = total - remaining
     pct = elapsed / total
     filled = int(width * pct)
@@ -67,7 +53,8 @@ def make_countdown_bar(remaining: int, total: int = 300, width: int = 30) -> str
     mins, secs = divmod(remaining, 60)
     return f"[{color}]{bar}[/{color}] [bold white]{mins:02d}:{secs:02d}[/bold white]"
 
-def make_progress_bar(elapsed: int, total: int = 300, width: int = 30) -> str:
+
+def make_progress_bar(elapsed: int, total: int = 300, width: int = 28) -> str:
     pct = elapsed / total
     filled = int(width * pct)
     empty = width - filled
@@ -80,6 +67,7 @@ def make_progress_bar(elapsed: int, total: int = 300, width: int = 30) -> str:
     bar = f"[{'█' * filled}{'░' * empty}]"
     mins, secs = divmod(total - elapsed, 60)
     return f"[{color}]{bar}[/{color}] [bold white]{mins:02d}:{secs:02d}[/bold white]"
+
 
 def rsi_status(rsi: float, prev_rsi: float) -> tuple:
     if rsi < 30:
@@ -103,6 +91,7 @@ def rsi_status(rsi: float, prev_rsi: float) -> tuple:
     else:
         return "OVERBOUGHT", "red", "↓"
 
+
 def ema_trend(price: float, ema_fast: float, ema_slow: float) -> tuple:
     if price > ema_fast > ema_slow:
         diff = (ema_fast - ema_slow) / ema_slow * 100
@@ -114,6 +103,7 @@ def ema_trend(price: float, ema_fast: float, ema_slow: float) -> tuple:
         return "CROSSING UP", "yellow", "🟡"
     else:
         return "CROSSING DOWN", "yellow", "🟡"
+
 
 def signal_badge(direction: str, confidence: float) -> tuple:
     if direction == "UP" and confidence >= 0.7:
@@ -129,9 +119,6 @@ def signal_badge(direction: str, confidence: float) -> tuple:
     else:
         return "⚪", "NO SIGNAL", "white"
 
-# ==================================================================
-# RENDERERS
-# ==================================================================
 
 def render_scan_dashboard(
     balance: float,
@@ -158,56 +145,58 @@ def render_scan_dashboard(
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("icon", style="bold", width=3)
     table.add_column("key", style="bold cyan", width=20)
-    table.add_column("value", style="white")
+    table.add_column("value")
     
     table.add_row("", "", "")
-    table.add_row("🤖", "BOT", "[bold white]POLYMARKET BTC 5M BOT[/bold white]  [dim]│[/dim]  [dim]Runtime: " + runtime + "[/dim]")
-    table.add_row("", "Mode", "[bold blue]SCANNING MARKET[/bold blue]")
+    table.add_row("🤖", "BOT", Text.assemble("POLYMARKET BTC 5M BOT", ("  |  ", "dim"), (f"Runtime: {runtime}", "dim"), style="bold white"))
+    table.add_row("", "Mode", Text("SCANNING MARKET", style="bold blue"))
     table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
-    table.add_row("", "", "")
-    
-    table.add_row("💰", "Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
-    table.add_row("📈", "Wins", f"[green]{wins}[/green]")
-    table.add_row("📉", "Losses", f"[red]{losses}[/red]")
-    table.add_row("📊", "Win Rate", f"[bold]{wr:.1f}%[/bold]  ([dim]{total_trades} trades[/dim])")
-    table.add_row("💵", "Total PnL", f"[bold {pnl_color}]{pnl_sign}${total_pnl:.2f}[/{pnl_color}]")
-    table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
     
-    table.add_row("📡", "Source", "[dim]Binance API (Yahoo Fallback)[/dim]")
-    table.add_row("📊", "Direction", f"[bold {sig_color}]{signal.direction}[/{sig_color}]")
-    table.add_row("🎯", "Confidence", f"[bold {sig_color}]{signal.confidence*100:.1f}%[/bold {sig_color}]")
+    table.add_row("💰", "Balance", Text(f"${balance:.2f} USDC", style="bold green"))
+    table.add_row("📈", "Wins", Text(str(wins), style="green"))
+    table.add_row("📉", "Losses", Text(str(losses), style="red"))
+    table.add_row("📊", "Win Rate", Text.assemble((f"{wr:.1f}%", "bold"), (f"  ({total_trades} trades)", "dim")))
+    table.add_row("💵", "Total PnL", Text(f"{pnl_sign}${total_pnl:.2f}", style=f"bold {pnl_color}"))
+    table.add_row("", "", "")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
     
-    table.add_row(f"{ema_emoji}", "EMA Trend", f"[{ema_color}]{ema_label}[/{ema_color}]")
-    table.add_row("📈", "EMA 9", f"{signal.ema_fast:.2f}")
-    table.add_row("📉", "EMA 21", f"{signal.ema_slow:.2f}")
-    table.add_row("💰", "Price", f"{signal.price:.2f}")
+    table.add_row("📡", "Source", Text("Binance API (Yahoo Fallback)", style="dim"))
+    table.add_row("📊", "Direction", Text(signal.direction, style=f"bold {sig_color}"))
+    table.add_row("🎯", "Confidence", Text(f"{signal.confidence*100:.1f}%", style=f"bold {sig_color}"))
     table.add_row("", "", "")
     
-    table.add_row("📈", "RSI 14", f"[bold {rsi_color}]{signal.rsi:.1f} {rsi_arrow}[/{rsi_color}]  ([dim]prev: {signal.prev_rsi:.1f}[/dim])")
-    table.add_row("📊", "RSI Status", f"[{rsi_color}]{rsi_label}[/{rsi_color}]")
+    table.add_row(f"{ema_emoji}", "EMA Trend", Text(ema_label, style=ema_color))
+    table.add_row("📈", "EMA 9", Text(f"{signal.ema_fast:.2f}"))
+    table.add_row("📉", "EMA 21", Text(f"{signal.ema_slow:.2f}"))
+    table.add_row("💰", "Price", Text(f"{signal.price:.2f}"))
     table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    
+    table.add_row("📈", "RSI 14", Text.assemble((f"{signal.rsi:.1f} {rsi_arrow}", f"bold {rsi_color}"), (f"  (prev: {signal.prev_rsi:.1f})", "dim")))
+    table.add_row("📊", "RSI Status", Text(rsi_label, style=rsi_color))
+    table.add_row("", "", "")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
     
     if market:
-        table.add_row("🎰", "Market", f"[dim]{market.slug}[/dim]")
-        table.add_row("💵", "UP Price", f"[green bold]{market.up_price:.4f}[/green bold]")
-        table.add_row("💵", "DOWN Price", f"[red bold]{market.down_price:.4f}[/red bold]")
-        table.add_row("🔒", "Resolved", "[bold red]YES[/bold red]" if market.resolved else "[bold green]NO[/bold green]")
+        table.add_row("🎰", "Market", Text(market.slug, style="dim"))
+        table.add_row("💵", "UP Price", Text(f"{market.up_price:.4f}", style="green bold"))
+        table.add_row("💵", "DOWN Price", Text(f"{market.down_price:.4f}", style="red bold"))
+        resolved_text = "YES" if market.resolved else "NO"
+        resolved_style = "bold red" if market.resolved else "bold green"
+        table.add_row("🔒", "Resolved", Text(resolved_text, style=resolved_style))
     else:
-        table.add_row("🎰", "Market", "[dim]Waiting for next window...[/dim]")
+        table.add_row("🎰", "Market", Text("Waiting for next window...", style="dim"))
     
     table.add_row("", "", "")
     countdown = make_countdown_bar(seconds_to_next, 300)
-    table.add_row("⏳", "Next Window", f"[bold yellow]{countdown}[/bold yellow]")
+    table.add_row("⏳", "Next Window", Text(countdown))
     table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
-    table.add_row(f"{sig_emoji}", "Status", f"[bold {sig_color}]{sig_text}[/{sig_color}]  [dim]•  {datetime.now().strftime('%H:%M:%S')}[dim]")
+    table.add_row(f"{sig_emoji}", "Status", Text.assemble((sig_text, f"bold {sig_color}"), (f"  •  {datetime.now().strftime('%H:%M:%S')}", "dim")))
     table.add_row("", "", "")
     
     return Panel(
@@ -215,7 +204,7 @@ def render_scan_dashboard(
         border_style="blue",
         box=box.ROUNDED,
         padding=(0, 2),
-        title=f"[bold blue]SCAN MODE[/bold blue]",
+        title="[bold blue]SCAN MODE[/bold blue]",
         title_align="left",
         subtitle=f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
         subtitle_align="right"
@@ -250,38 +239,38 @@ def render_monitor_dashboard(
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("icon", style="bold", width=3)
     table.add_column("key", style="bold cyan", width=20)
-    table.add_column("value", style="white")
+    table.add_column("value")
     
     table.add_row("", "", "")
-    table.add_row("🤖", "BOT", "[bold white]POLYMARKET BTC 5M BOT[/bold white]  [dim]│[/dim]  [dim]Runtime: " + runtime + "[/dim]")
-    table.add_row("", "Mode", "[bold green]MONITORING POSITION[/bold green]")
+    table.add_row("🤖", "BOT", Text.assemble("POLYMARKET BTC 5M BOT", ("  |  ", "dim"), (f"Runtime: {runtime}", "dim"), style="bold white"))
+    table.add_row("", "Mode", Text("MONITORING POSITION", style="bold green"))
     table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
-    table.add_row("", "", "")
-    
-    table.add_row("💰", "Balance", f"[bold green]${balance:.2f}[/bold green] USDC")
-    table.add_row("📈", "Wins", f"[green]{wins}[/green]")
-    table.add_row("📉", "Losses", f"[red]{losses}[/red]")
-    table.add_row("📊", "Win Rate", f"[bold]{wr:.1f}%[/bold]")
-    table.add_row("💵", "Total PnL", f"[bold {pnl_color}]{pnl_sign}${total_pnl:.2f}[/{pnl_color}]")
-    table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
     
-    table.add_row(f"{side_emoji}", "Entry Side", f"[bold {side_color}]{entry_side}[/{side_color}]")
-    table.add_row("💵", "Entry Amount", f"[bold]${entry_amount:.2f}[/bold] USDC")
-    table.add_row("💵", "Entry Price", f"{entry_price:.4f}")
-    table.add_row("🎰", "Market", f"[dim]{market.slug}[/dim]")
+    table.add_row("💰", "Balance", Text(f"${balance:.2f} USDC", style="bold green"))
+    table.add_row("📈", "Wins", Text(str(wins), style="green"))
+    table.add_row("📉", "Losses", Text(str(losses), style="red"))
+    table.add_row("📊", "Win Rate", Text(f"{wr:.1f}%", style="bold"))
+    table.add_row("💵", "Total PnL", Text(f"{pnl_sign}${total_pnl:.2f}", style=f"bold {pnl_color}"))
+    table.add_row("", "", "")
+    table.add_row("", "", Text("-" * 55, style="dim"))
+    table.add_row("", "", "")
+    
+    table.add_row(f"{side_emoji}", "Entry Side", Text(entry_side, style=f"bold {side_color}"))
+    table.add_row("💵", "Entry Amount", Text(f"${entry_amount:.2f} USDC", style="bold"))
+    table.add_row("💵", "Entry Price", Text(f"{entry_price:.4f}"))
+    table.add_row("🎰", "Market", Text(market.slug, style="dim"))
     table.add_row("", "", "")
     
     progress = make_progress_bar(elapsed, 300)
-    table.add_row("⏳", "Window Close", f"[bold yellow]{progress}[/bold yellow]")
+    table.add_row("⏳", "Window Close", Text(progress))
     mins, secs = divmod(remaining, 60)
-    table.add_row("⏱️ ", "Remaining", f"[bold]{mins:02d}:{secs:02d}[/bold]")
+    table.add_row("⏱️ ", "Remaining", Text(f"{mins:02d}:{secs:02d}", style="bold"))
     table.add_row("", "", "")
-    table.add_row("", "", "[dim]" + "─" * 55 + "[/dim]")
+    table.add_row("", "", Text("-" * 55, style="dim"))
     table.add_row("", "", "")
-    table.add_row(f"{side_emoji}", "Status", f"[bold {side_color}]POSITION OPEN[/{side_color}]  [dim]•  Waiting resolution...  •  {datetime.now().strftime('%H:%M:%S')}[dim]")
+    table.add_row(f"{side_emoji}", "Status", Text.assemble(("POSITION OPEN", f"bold {side_color}"), (f"  •  Waiting resolution...  •  {datetime.now().strftime('%H:%M:%S')}", "dim")))
     table.add_row("", "", "")
     
     return Panel(
@@ -289,16 +278,12 @@ def render_monitor_dashboard(
         border_style="green",
         box=box.ROUNDED,
         padding=(0, 2),
-        title=f"[bold green]MONITOR MODE[/bold green]",
+        title="[bold green]MONITOR MODE[/bold green]",
         title_align="left",
         subtitle=f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/dim]",
         subtitle_align="right"
     )
 
-
-# ==================================================================
-# BOT CLASS
-# ==================================================================
 
 class BTC5mBot:
     def __init__(self, config: BotConfig):
