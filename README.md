@@ -17,12 +17,18 @@ Bot automation untuk trading market **BTC Up/Down 5 menit** di Polymarket dengan
 ### 1. Clone & Setup Environment
 
 ```bash
-git clone <repo-url>
-cd polymarket-btc-bot
+git clone https://github.com/Jametkudasigan/polyemarsi.git
+```
+```
+cd polyemarsi
+```
+```
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# atau: venv\Scripts\activate  # Windows
-
+```
+```
+source venv/bin/activate
+```
+```
 pip install -r requirements.txt
 ```
 
